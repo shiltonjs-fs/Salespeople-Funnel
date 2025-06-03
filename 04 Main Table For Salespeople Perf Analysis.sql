@@ -19,23 +19,49 @@ with
                     DEV.SBOX_SHILTON.CONTACT_OWNERS_HISTORICAL
             )
     ),
+    USER_UTM as (
+        select
+            CAST(T1.HUBSPOT_CONTACT_ID as INT) RECORD_ID,
+            CASE
+                WHEN SUBSTRING(T1.ACCOUNT_NUMBER, 1, 2) != 'CU' THEN NULL
+                ELSE CAST(SUBSTRING(T1.ACCOUNT_NUMBER, 3) AS INT)
+            END USER_ID,
+            T3.COMPANY_ID,
+            TRY_TO_TIMESTAMP(T1.HUBSPOT_CREATED_DATE) HUBSPOT_CREATED_DATE,
+            T1.BECAME_INTERESTED_IN_COLLECT_DATE,
+            T2.SALES_OWNER
+        from
+            CBM.CARDUP_DB_REPORTING.USER_UTM T1
+            left outer join CBM.CARDUP_DB_REPORTING.USER_DATA T2 on CASE
+                WHEN SUBSTRING(T1.ACCOUNT_NUMBER, 1, 2) != 'CU' THEN NULL
+                ELSE CAST(SUBSTRING(T1.ACCOUNT_NUMBER, 3) AS INT)
+            END = T2.USER_ID
+            left outer join CBM.CARDUP_DB_REPORTING.COMPANY_DATA T3 on T2.COMPANY_ID = T3.COMPANY_ID
+        where
+            T1.HUBSPOT_CREATED_DATE is not null
+            and T1.CU_LOCALE_ID = 1
+    ),
     MAKE_ONBOARDING_TABLE as (
         select
-            U.USER_ID,
+            X.COMPANY_ID,
             X.KYB_COMPLETED_DATE MAKE_ONBOARDED_DATE,
-            U.CREATED_AT_SG SIGN_UP_DATE,
-            X.INDUSTRY INDUSTRY
+            X.INDUSTRY INDUSTRY,
+            MIN(U.CREATED_AT_SG) SIGN_UP_DATE
         from
             CBM.CARDUP_DB_REPORTING.COMPANY_DATA X
             join CBM.CARDUP_DB_REPORTING.USER_DATA U on X.COMPANY_ID = U.COMPANY_ID
         where
             U.CU_LOCALE_ID = 1
             and X.CU_LOCALE_ID = 1
-            and STATUS = 'Active'
+            and U.STATUS = 'Active'
+        group by
+            1,
+            2,
+            3
     ),
     COLLECT_TABLE as (
         select
-            PAYEE_ID USER_ID,
+            PAYEE_ID COMPANY_ID,
             COLLECT_SETUP_SUBMITTED_DATE CSS_DATE,
             COLLECTOR_ONBOARDED_DATE COLLECT_ONBOARDED_DATE
         from
@@ -45,7 +71,7 @@ with
     ),
     PAYMENT_TABLE as (
         select
-            USER_ID
+            COMPANY_ID
             --, t2.cardup_payment_payment_type cardup_payment_payment_type_make
             --, t3.cardup_payment_payment_type cardup_payment_payment_type_collect
 ,
@@ -56,7 +82,7 @@ with
         from
             (
                 select
-                    CARDUP_PAYMENT_USER_ID USER_ID,
+                    CARDUP_PAYMENT_CUSTOMER_COMPANY_ID COMPANY_ID,
                     MIN(
                         case
                             when CARDUP_PAYMENT_USER_TYPE = 'business' then CARDUP_PAYMENT_SUCCESS_AT_UTC_TS
@@ -94,10 +120,12 @@ with
             (
                 select
                     RECORD_ID,
+                    COMPANY_ID,
                     USER_ID,
                     CONTACT_OWNER,
                     CONTACT_OWNER_HISTORICAL,
-                    DATE(HUBSPOT_CREATED_DATE) HS_CREATE_DATE,
+                    SALES_OWNER CONTACT_OWNER_FROM_DWH,
+                    HUBSPOT_CREATED_DATE HS_CREATE_DATE,
                     SIGN_UP_DATE,
                     BECAME_INTERESTED_IN_COLLECT_DATE IIC_DATE,
                     INDUSTRY,
@@ -105,8 +133,8 @@ with
                     MAKE_ONBOARDED_DATE,
                     CSS_DATE,
                     COLLECT_ONBOARDED_DATE,
-                    CARDUP_PAYMENT_PAYMENT_TYPE_MAKE,
-                    CARDUP_PAYMENT_PAYMENT_TYPE_COLLECT,
+                    --CARDUP_PAYMENT_PAYMENT_TYPE_MAKE,
+                    --CARDUP_PAYMENT_PAYMENT_TYPE_COLLECT,
                     FIRST_PAYMENT_DATE_MAKE,
                     FIRST_PAYMENT_DATE_COLLECT
                     --, first_payment_amount_make
@@ -115,47 +143,39 @@ with
                     FIRST_30D_PAYMENT_AMOUNT_MAKE,
                     FIRST_30D_PAYMENT_AMOUNT_COLLECT
                 from
-                    HS_TABLE
-                    left outer join (
-                        select
-                            CAST(HUBSPOT_CONTACT_ID as INT) RECORD_ID,
-                            USER_UTM_ID USER_ID,
-                            HUBSPOT_CREATED_DATE,
-                            BECAME_INTERESTED_IN_COLLECT_DATE
-                        from
-                            CBM.CARDUP_DB_REPORTING.USER_UTM
-                    ) USER_UTM using (RECORD_ID)
-                    left outer join COLLECT_TABLE using (USER_ID)
-                    left outer join MAKE_ONBOARDING_TABLE using (USER_ID)
-                    left outer join DEV.SBOX_SHILTON.CARDUP_B2B_SG_USERID_F30DMAKE_F30DCOLLECT_AMOUNT F30D using (USER_ID)
-                    left outer join PAYMENT_TABLE using (USER_ID)
-                    left outer join DEV.SBOX_SHILTON.CARDUP_B2B_SG_CONTACT_OWNERS_OUTBOUNDINBOUND_CATEGORIZATION using (RECORD_ID)
+                    USER_UTM
+                    left outer join HS_TABLE using (RECORD_ID)
+                    left outer join MAKE_ONBOARDING_TABLE using (COMPANY_ID)
+                    left outer join COLLECT_TABLE using (COMPANY_ID)
+                    left outer join DEV.SBOX_SHILTON.CARDUP_B2B_SG_USERID_F30DMAKE_F30DCOLLECT_AMOUNT F30D using (COMPANY_ID)
+                    left outer join PAYMENT_TABLE using (COMPANY_ID)
+                    left outer join DEV.SBOX_SHILTON.CONTACT_OWNERS_HISTORICAL_UNPIVOT_INBOUND_OUTBOUND using (RECORD_ID)
             )
     )
 select distinct
     *,
     case
-        when DATEDIFF(minute, HS_CREATE_DATE, SIGN_UP_DATE) >= 0 then DATEDIFF(minute, HS_CREATE_DATE, SIGN_UP_DATE) / 1440
+        when DATEDIFF(MINUTE, HS_CREATE_DATE, SIGN_UP_DATE) >= 0 then DATEDIFF(MINUTE, HS_CREATE_DATE, SIGN_UP_DATE) / 1440
         else null
     end DAYS_LEAD_TO_SIGN_UP,
     case
-        when DATEDIFF(minute, SIGN_UP_DATE, MAKE_ONBOARDED_DATE) >= 0 then DATEDIFF(minute, SIGN_UP_DATE, MAKE_ONBOARDED_DATE) / 1440
+        when DATEDIFF(MINUTE, SIGN_UP_DATE, MAKE_ONBOARDED_DATE) >= 0 then DATEDIFF(MINUTE, SIGN_UP_DATE, MAKE_ONBOARDED_DATE) / 1440
         else null
     end DAYS_SIGN_UP_TO_ONBOARDED_MAKE,
     case
-        when DATEDIFF(minute, MAKE_ONBOARDED_DATE, FIRST_PAYMENT_DATE_MAKE) >= 0 then DATEDIFF(minute, MAKE_ONBOARDED_DATE, FIRST_PAYMENT_DATE_MAKE) / 1440
+        when DATEDIFF(MINUTE, MAKE_ONBOARDED_DATE, FIRST_PAYMENT_DATE_MAKE) >= 0 then DATEDIFF(MINUTE, MAKE_ONBOARDED_DATE, FIRST_PAYMENT_DATE_MAKE) / 1440
         else null
     end DAYS_ONBOARDED_MAKE_TO_FIRST_PAYMENT_MAKE,
     case
-        when DATEDIFF(minute, IIC_DATE, CSS_DATE) >= 0 then DATEDIFF(minute, IIC_DATE, CSS_DATE) / 1440
+        when DATEDIFF(MINUTE, IIC_DATE, CSS_DATE) >= 0 then DATEDIFF(MINUTE, IIC_DATE, CSS_DATE) / 1440
         else null
     end DAYS_IIC_TO_CSS,
     case
-        when DATEDIFF(minute, CSS_DATE, COLLECT_ONBOARDED_DATE) >= 0 then DATEDIFF(minute, CSS_DATE, COLLECT_ONBOARDED_DATE) / 1440
+        when DATEDIFF(MINUTE, CSS_DATE, COLLECT_ONBOARDED_DATE) >= 0 then DATEDIFF(MINUTE, CSS_DATE, COLLECT_ONBOARDED_DATE) / 1440
         else null
     end DAYS_CSS_TO_ONBOARDED_COLLECT,
     case
-        when DATEDIFF(minute, COLLECT_ONBOARDED_DATE, FIRST_PAYMENT_DATE_COLLECT) >= 0 then DATEDIFF(minute, COLLECT_ONBOARDED_DATE, FIRST_PAYMENT_DATE_COLLECT) / 1440
+        when DATEDIFF(MINUTE, COLLECT_ONBOARDED_DATE, FIRST_PAYMENT_DATE_COLLECT) >= 0 then DATEDIFF(MINUTE, COLLECT_ONBOARDED_DATE, FIRST_PAYMENT_DATE_COLLECT) / 1440
         else null
     end DAYS_ONBOARDED_COLLECT_TO_FIRST_PAYMENT_COLLECT
 from
